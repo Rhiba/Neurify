@@ -12,23 +12,17 @@
 #include "nnet.h"
 
 
-int PROPERTY = 5;
 char *LOG_FILE = "logs/log.txt";
-float INF = 1;
-
 int ERR_NODE=10;
-
-int NORM_INPUT=1;
-
 int CHECK_ADV_MODE = 0;
-
+int PROPERTY;
 struct timeval start,finish,last_finish;
 //FILE *fp;
 
 //Take in a .nnet filename with path and load the network from the file
 //Inputs:  filename - const char* that specifies the name and path of file
 //Outputs: void *   - points to the loaded neural network
-struct NNet *load_conv_network(const char* filename, int img)
+struct NNet *load_conv_network(const char* filename, float *input)
 {
     //Load file and check if it exists
     FILE *fstream = fopen(filename,"r");
@@ -57,6 +51,9 @@ struct NNet *load_conv_network(const char* filename, int img)
     nnet->outputSize = atoi(strtok(NULL,",\n"));
     nnet->maxLayerSize = atoi(strtok(NULL,",\n"));
 
+    printf("max layer size %d\n",nnet->maxLayerSize);
+
+
     //Allocate space for and read values of the array members of the network
     nnet->layerSizes = (int*)malloc(sizeof(int)*(nnet->numLayers+1));
     line = fgets(buffer,bufferSize,fstream);
@@ -67,8 +64,8 @@ struct NNet *load_conv_network(const char* filename, int img)
         record = strtok(NULL,",\n");
     }
     //Load Min and Max values of inputs
-    nnet->min = MIN_PIXEL;
-    nnet->max = MAX_PIXEL;
+    nnet->min = 0.0;
+    nnet->max = 1.0;
     
     nnet->layerTypes = (int*)malloc(sizeof(int)*nnet->numLayers);
     nnet->convLayersNum = 0;
@@ -93,10 +90,13 @@ struct NNet *load_conv_network(const char* filename, int img)
         record = strtok(line,",\n");
         for (int i = 0; i<5; i++){
             nnet->convLayer[cl][i] = atoi(record);
+
             //printf("%d,", nnet->convLayer[cl][i]);
+
             record = strtok(NULL,",\n");
         }
-        //printf("\n");
+
+        printf("\n");
     }
 
     //Allocate space for matrix of Neural Network
@@ -153,6 +153,8 @@ struct NNet *load_conv_network(const char* filename, int img)
     int out_channel=0,kernel_size=0;
 
     //Read in parameters and put them in the matrix
+
+    // ERROR IS IN THIS BLOCK
     float w = 0.0;
     while((line=fgets(buffer,bufferSize,fstream))!=NULL){
         if(nnet->layerTypes[layer]==1){
@@ -240,21 +242,14 @@ struct NNet *load_conv_network(const char* filename, int img)
             i++;
         }            
     }
-    //printf("load matrix done\n");
-    
-    float input_prev[nnet->inputSize];
-    struct Matrix input_prev_matrix = {input_prev, 1, nnet->inputSize};
+    // ERROR IS IN THE BLOCK ABOVE
+    printf("load matrix done\n");
+
+    //printf("input size: %d\n",nnet->inputSize);
+    struct Matrix input_prev_matrix = {input, 1, nnet->inputSize};
     float o[nnet->outputSize];
     struct Matrix output = {o, nnet->outputSize, 1};
-    //printf("start load inputs\n");
-    load_inputs(img, nnet->inputSize, input_prev);
-    //printf("load inputs done\n");
-    if(NORM_INPUT){
-        normalize_input(nnet, &input_prev_matrix);
-    }
-    //printf("normalize_input done\n");
     evaluate_conv(nnet, &input_prev_matrix, &output);
-    printMatrix(&output);
     
     float largest = output.data[0];
     nnet->target = 0;
@@ -404,11 +399,17 @@ void set_input_constraints(struct Interval *input,
     for(int var=1;var<Ncol+1;var++){
         colno[0] = var;
         row[0] = 1;
-        add_constraintex(lp, 1, row, colno, LE,\
-                    input->upper_matrix.data[var-1]);
-        add_constraintex(lp, 1, row, colno, GE,\
-                    input->lower_matrix.data[var-1]);
-        *rule_num += 2;
+        if (input->upper_matrix.data[var-1] == input->lower_matrix.data[var-1]) {
+            add_constraintex(lp, 1, row, colno, EQ,\
+                        input->upper_matrix.data[var-1]);
+            *rule_num += 1;
+        } else {
+            add_constraintex(lp, 1, row, colno, LE,\
+                        input->upper_matrix.data[var-1]);
+            add_constraintex(lp, 1, row, colno, GE,\
+                        input->lower_matrix.data[var-1]);
+            *rule_num += 2;
+        }
     }
     set_add_rowmode(lp, FALSE);
 }
@@ -535,63 +536,56 @@ float set_wrong_node_constraints(lprec *lp,
     return unsat;
 }
 
+int find_in_h(int needle, int* h, int h_size) {
+    for (int i=0; i<h_size; i++){
+        if (needle == h[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 void initialize_input_interval(struct NNet* nnet,
-                int img, int inputSize, float *input,
-                float *u, float *l)
+                float *input, int input_size,
+                int *h, int h_size,
+                float *u, float *l, float *u_bounds, float *l_bounds)
 {
-    load_inputs(img, inputSize, input);
-    if(PROPERTY == 0){
-        for(int i =0;i<inputSize;i++){
-            u[i] = input[i]+INF;
+    for(int i =0;i<input_size;i++){
+        // make the entries in the hitting set constant
+        if (find_in_h(i,h,h_size)) {
+            // make lower and upper bounds the same, this will affect how the constraints
+            // are added later on
+            float ERR = 1e-3;
+            u[i] = input[i]+ERR;
+            l[i] = input[i]-ERR;
             if(u[i] > nnet->max) {
                 u[i] = nnet->max;
             }
-            l[i] = input[i]-INF;
+            if(l[i] < nnet->min) {
+                l[i] = nnet->min;
+            }
+        } else {
+            u[i] = u_bounds[i];
+            if(u[i] > nnet->max) {
+                u[i] = nnet->max;
+            }
+            l[i] = l_bounds[i];
             if(l[i] < nnet->min) {
                 l[i] = nnet->min;
             }
         }
-        // used for biases
-        u[inputSize] = 1;
-        l[inputSize] = 1;
     }
-    else if(PROPERTY == 1){
-        /*
-         * Customize your own initial input range
-         */
-    }
-    else{
-        for(int i =0;i<inputSize;i++){
-            u[i] = input[i]+INF;
-            l[i] = input[i]-INF;
-        }
-    }
+    // used for biases
+    u[input_size] = 1;
+    l[input_size] = 1;
 
 }
 
 
 void load_inputs(int img, int inputSize, float *input){
-
-    if(img>=100000){
-        printf("ERR: Over 100000 images!\n");
-        exit(1);
-    }
-    char str[12];
-    char image_name[18];
-
-    /*
-     * Customize your own dataset
-     */
-
-    char tmp[18] = "images/image";
-    strcpy(image_name, tmp);
-
-    sprintf(str, "%d", img);
-    FILE *fstream = fopen(strcat(image_name,str),"r");
+    FILE *fstream = fopen("text_inputs/0_spellbinding.csv","r");
     if (fstream == NULL)
     {
-        printf("no input:%s!\n", image_name);
         exit(1);
     }
     int bufferSize = 10240*5;
@@ -717,7 +711,9 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
     for (i=0; i < nnet->inputSize; i++)
     {
         z[i] = input->data[i];
+
     }
+    //printf("nnet input size: %d\n",nnet->inputSize);
 
     int out_channel=0, in_channel=0, kernel_size=0;
     int stride=0, padding=0;
@@ -727,7 +723,7 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
 
         memset(a, 0, sizeof(float)*nnet->maxLayerSize);
 
-        //printf("layer:%d %d\n",layer, nnet->layerTypes[layer]);        
+        //printf("layer %d: %d\n",layer, nnet->layerTypes[layer]);        
         if(nnet->layerTypes[layer]==0){
             for (i=0; i < nnet->layerSizes[layer+1]; i++){
                 float **weights = matrix[layer][0];
@@ -744,7 +740,7 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
 
                 //Perform ReLU
                 if (tempVal<0.0 && layer<(numLayers-1)){
-                    // printf( "doing RELU on layer %u\n", layer );
+                     //printf( "doing RELU on layer %u\n", layer );
                     tempVal = 0.0;
                 }
                 a[i]=tempVal;
@@ -757,18 +753,25 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
         }
         else{
             out_channel = nnet->convLayer[layer][0];
+            //printf("out_channel %d\n",out_channel);
             in_channel = nnet->convLayer[layer][1];
+            //printf("in_channel %d\n",in_channel);
             kernel_size = nnet->convLayer[layer][2];
+            //printf("kernel_size %d\n",kernel_size);
             stride = nnet->convLayer[layer][3];
+            //printf("stride %d\n",stride);
             padding = nnet->convLayer[layer][4];
+            //printf("padding %d\n",padding);
             //size is the input size in each channel
             int size = sqrt(nnet->layerSizes[layer]/in_channel);
+            //printf("size %d\n",size);
             //padding size is the input size after padding
             int padding_size = size+2*padding;
             //this is only for compressed model
             if(kernel_size%2==1){
                 padding_size += 1;
             }
+            //printf("size with padding %d\n",padding_size);
             //out_size is the output size in each channel after kernel
             int out_size = 0;
 
@@ -783,18 +786,23 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
             else{
                 out_size = (int)(tmp_out_size)-1;
             }
+            //printf("out size %d\n",out_size);
 
             float *z_new = (float*)malloc(sizeof(float)*padding_size*padding_size*in_channel);
+
+            // this part adds in any padding to z_new
             memset(z_new, 0, sizeof(float)*padding_size*padding_size*in_channel);
             for(int ic=0;ic<in_channel;ic++){
                 for(int h=0;h<size;h++){
                     for(int w=0;w<size;w++){
+
                         z_new[ic*padding_size*padding_size+padding_size*(h+padding)+w+padding] =\
                                                             z[ic*size*size+size*h+w];
                     }
                 }
             }
 
+            // this part does the convolution
             for(int oc=0;oc<out_channel;oc++){
                 for(int oh=0;oh<out_size;oh++){
                     for(int ow=0;ow<out_size;ow++){
@@ -818,8 +826,10 @@ int evaluate_conv(struct NNet *network, struct Matrix *input, struct Matrix *out
                     a[j] = 0;
                 }
                 z[j] = a[j];
-
+                //printf("%f ",a[j]);
             }
+            
+            //printf("\n");
             free(z_new);
         }
     }
@@ -859,11 +869,12 @@ void backward_prop_conv(struct NNet *nnet, float *grad,
 
     for(layer = numLayers-2;layer>-1;layer--){
         //printf("layer:%d , %d\n", layer, nnet->layerTypes[layer]);
-        float **weights = nnet->matrix[layer][0];
+        float **weights;
         memset(grad1_upper, 0, sizeof(float)*maxLayerSize);
         memset(grad1_lower, 0, sizeof(float)*maxLayerSize);
 
         if(nnet->layerTypes[layer]!=1){
+            weights = nnet->matrix[layer][0];
             if(layer != 0){
                 for(j=0;j<nnet->layerSizes[numLayers-1];j++){
                     if(R[layer][j]==0){

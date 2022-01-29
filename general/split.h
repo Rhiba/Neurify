@@ -66,6 +66,8 @@ struct direct_run_check_conv_lp_args
 
 
 void check_adv(struct NNet *nnet, struct Interval *input);
+void check_adv1(struct NNet* nnet, struct Matrix *adv);
+int check_l1(float *input, int inputSize);
 
 int check_functions(struct NNet *nnet, struct Interval *output);
 
